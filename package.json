@@ -10,7 +10,6 @@
     "@huggingface/inference": "^2.8.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "groq-sdk": "^0.3.3",
-    "node-telegram-bot-api": "^0.66.0"
+    "groq-sdk": "^0.3.3"
   }
 }

@@ -1,7 +1,6 @@
 require('dotenv').config();
 require('dns').setDefaultResultOrder('ipv4first');
 const express = require('express');
-const TelegramBot = require('node-telegram-bot-api');
 const { Groq } = require('groq-sdk');
 const { HfInference } = require('@huggingface/inference');
 const path = require('path');
@@ -14,42 +13,92 @@ app.use(express.json());
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const hf = new HfInference(process.env.HF_ACCESS_TOKEN);
 
-// Check if running on Hugging Face Spaces (SPACE_ID is set automatically by HF)
+// Check environment
 const IS_HF = !!process.env.SPACE_ID;
 const PORT = process.env.PORT || 7860;
 
-let bot;
+// ----------------------------------------------------
+// Telegram API Helper Functions (Native Fetch)
+// ----------------------------------------------------
+const TELEGRAM_API_URL = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 
-if (IS_HF) {
-  // Hugging Face Space URL structure: bommagoni-image.hf.space
-  const subdomain = process.env.SPACE_ID.replace('/', '-').toLowerCase();
-  const webhookUrl = `https://${subdomain}.hf.space/webhook`;
-  
-  bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN);
-  
-  const setWebhookWithRetry = async (retries = 5, delay = 5000) => {
-    for (let i = 0; i < retries; i++) {
-      try {
-        await bot.setWebHook(webhookUrl);
-        console.log(`Telegram Webhook registered successfully at: ${webhookUrl}`);
-        return;
-      } catch (err) {
-        console.error(`Failed to set webhook (attempt ${i + 1}/${retries}):`, err.message);
-        if (i === retries - 1) throw err;
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
+async function sendTelegramMessage(chatId, text, options = {}) {
+  try {
+    const response = await fetch(`${TELEGRAM_API_URL}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: text,
+        ...options
+      })
+    });
+    return await response.json();
+  } catch (err) {
+    console.error('Error sending message:', err.message);
+    throw err;
+  }
+}
+
+async function editTelegramMessage(chatId, messageId, text, options = {}) {
+  try {
+    const response = await fetch(`${TELEGRAM_API_URL}/editMessageText`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: messageId,
+        text: text,
+        ...options
+      })
+    });
+    return await response.json();
+  } catch (err) {
+    console.error('Error editing message:', err.message);
+    throw err;
+  }
+}
+
+async function deleteTelegramMessage(chatId, messageId) {
+  try {
+    await fetch(`${TELEGRAM_API_URL}/deleteMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: messageId
+      })
+    });
+  } catch (err) {
+    console.error('Error deleting message:', err.message);
+  }
+}
+
+async function sendTelegramPhoto(chatId, imageBuffer, caption, options = {}) {
+  try {
+    const formData = new FormData();
+    formData.append('chat_id', chatId);
+    formData.append('caption', caption);
+    if (options.parse_mode) {
+      formData.append('parse_mode', options.parse_mode);
     }
-  };
-
-  setWebhookWithRetry().catch(err => console.error('All webhook registration attempts failed:', err));
-} else {
-  // Local development: use polling
-  bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
-  console.log('Telegram Bot started in polling mode (Local Development)');
+    
+    const blob = new Blob([imageBuffer], { type: 'image/jpeg' });
+    formData.append('photo', blob, 'image.jpg');
+    
+    const response = await fetch(`${TELEGRAM_API_URL}/sendPhoto`, {
+      method: 'POST',
+      body: formData
+    });
+    return await response.json();
+  } catch (err) {
+    console.error('Error sending photo:', err.message);
+    throw err;
+  }
 }
 
 // ----------------------------------------------------
-// Prompt Enhancer (Groq Llama-3)
+// Prompt Enhancer (Groq Llama-3.1)
 // ----------------------------------------------------
 async function enhancePrompt(userPrompt) {
   try {
@@ -109,83 +158,73 @@ async function generateImage(prompt) {
 }
 
 // ----------------------------------------------------
-// Bot Message Handlers
+// Bot Message Handlers & Router
 // ----------------------------------------------------
 async function handleImageRequest(chatId, prompt) {
-  // Send loading feedback
-  const statusMsg = await bot.sendMessage(chatId, '🪄 *Step 1/2:* Groq is enhancing your prompt...', { parse_mode: 'Markdown' });
+  const statusMsgResult = await sendTelegramMessage(chatId, '🪄 *Step 1/2:* Groq is enhancing your prompt...', { parse_mode: 'Markdown' });
+  const statusMsgId = statusMsgResult.result?.message_id;
 
   try {
-    // 1. Enhance using Groq
     const enhancedPrompt = await enhancePrompt(prompt);
     
-    // Update status to image generation
-    await bot.editMessageText(`✨ *Step 2/2:* Generating image using FLUX.1...\n\n_Enhanced prompt:_\n"${enhancedPrompt}"`, {
-      chat_id: chatId,
-      message_id: statusMsg.message_id,
-      parse_mode: 'Markdown'
-    });
+    if (statusMsgId) {
+      await editTelegramMessage(chatId, statusMsgId, `✨ *Step 2/2:* Generating image using FLUX.1...\n\n_Enhanced prompt:_\n"${enhancedPrompt}"`, {
+        parse_mode: 'Markdown'
+      });
+    }
 
-    // 2. Generate image using Hugging Face
     const imageBuffer = await generateImage(enhancedPrompt);
 
-    // 3. Send image to user
-    await bot.sendPhoto(chatId, imageBuffer, {
-      caption: `🎨 *Here is your generated image!*\n\n_Original prompt:_\n"${prompt}"\n\n_Enhanced:_\n"${enhancedPrompt}"`,
+    await sendTelegramPhoto(chatId, imageBuffer, `🎨 *Here is your generated image!*\n\n_Original prompt:_\n"${prompt}"\n\n_Enhanced:_\n"${enhancedPrompt}"`, {
       parse_mode: 'Markdown'
     });
 
-    // Clean up loading message
-    await bot.deleteMessage(chatId, statusMsg.message_id).catch(() => {});
+    if (statusMsgId) {
+      await deleteTelegramMessage(chatId, statusMsgId).catch(() => {});
+    }
   } catch (error) {
     console.error('Image request handling failed:', error);
-    await bot.editMessageText(`❌ *Failed to generate image.*\n\nError: ${error.message || 'An unknown error occurred.'}`, {
-      chat_id: chatId,
-      message_id: statusMsg.message_id,
-      parse_mode: 'Markdown'
-    }).catch(() => {
-      bot.sendMessage(chatId, `❌ *Failed to generate image.*`);
-    });
+    if (statusMsgId) {
+      await editTelegramMessage(chatId, statusMsgId, `❌ *Failed to generate image.*\n\nError: ${error.message || 'An unknown error occurred.'}`, {
+        parse_mode: 'Markdown'
+      }).catch(() => {
+        sendTelegramMessage(chatId, `❌ *Failed to generate image.*`);
+      });
+    } else {
+      await sendTelegramMessage(chatId, `❌ *Failed to generate image.*`);
+    }
   }
 }
 
-bot.onText(/\/start/, (msg) => {
+async function handleUpdate(update) {
+  const msg = update.message;
+  if (!msg || !msg.text) return;
+  
   const chatId = msg.chat.id;
-  bot.sendMessage(chatId, `✨ *Welcome to AuraGen Bot!* ✨\n\nI am a premium image generator. You send a simple idea, I will use **Groq (Llama-3)** to enhance it, and **Hugging Face (FLUX.1)** to generate a stunning image!\n\n🚀 *How to use:*\nUse the command:\n\`/generate <your prompt>\`\n\nOr simply send me a direct message with your prompt!\n\nExample:\n\`/generate a golden retriever puppy in a spacesuit\`\n\nEnjoy creating!`, { parse_mode: 'Markdown' });
-});
-
-bot.onText(/\/help/, (msg) => {
-  const chatId = msg.chat.id;
-  bot.sendMessage(chatId, `💡 *AuraGen Bot Commands*:\n\n• \`/generate <prompt>\` - Enhances and generates an image from your prompt.\n• \`/start\` or \`/help\` - Show bot info and welcome instructions.`, { parse_mode: 'Markdown' });
-});
-
-bot.onText(/\/generate(?:\s+(.+))?/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const prompt = match[1];
-
-  if (!prompt) {
-    bot.sendMessage(chatId, '⚠️ Please provide a prompt! Example: `/generate cute baby panda playing coding`', { parse_mode: 'Markdown' });
-    return;
+  const text = msg.text.trim();
+  
+  if (text.startsWith('/start')) {
+    await sendTelegramMessage(chatId, `✨ *Welcome to AuraGen Bot!* ✨\n\nI am a premium image generator. You send a simple idea, I will use **Groq (Llama-3)** to enhance it, and **Hugging Face (FLUX.1)** to generate a stunning image!\n\n🚀 *How to use:*\nUse the command:\n\`/generate <your prompt>\`\n\nOr simply send me a direct message with your prompt!\n\nExample:\n\`/generate a golden retriever puppy in a spacesuit\`\n\nEnjoy creating!`, { parse_mode: 'Markdown' });
+  } else if (text.startsWith('/help')) {
+    await sendTelegramMessage(chatId, `💡 *AuraGen Bot Commands*:\n\n• \`/generate <prompt>\` - Enhances and generates an image from your prompt.\n• \`/start\` or \`/help\` - Show bot info and welcome instructions.`, { parse_mode: 'Markdown' });
+  } else if (text.startsWith('/generate')) {
+    const prompt = text.replace(/^\/generate\s*/, '');
+    if (!prompt) {
+      await sendTelegramMessage(chatId, '⚠️ Please provide a prompt! Example: `/generate cute baby panda playing coding`', { parse_mode: 'Markdown' });
+      return;
+    }
+    await handleImageRequest(chatId, prompt);
+  } else {
+    // Direct private message handles directly
+    const isPrivate = msg.chat.type === 'private';
+    if (isPrivate) {
+      await handleImageRequest(chatId, text);
+    }
   }
-  await handleImageRequest(chatId, prompt);
-});
-
-// Handle plain text messages in private chats (treating them directly as prompts)
-bot.on('message', async (msg) => {
-  const text = msg.text;
-  if (!text) return;
-  if (text.startsWith('/')) return; // Let command handlers process commands
-
-  const chatId = msg.chat.id;
-  const isPrivate = msg.chat.type === 'private';
-
-  if (isPrivate) {
-    await handleImageRequest(chatId, text);
-  }
-});
+}
 
 // ----------------------------------------------------
-// Web Server (Express)
+// Web Server (Express) & Webhook/Polling Init
 // ----------------------------------------------------
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'dashboard.html'));
@@ -238,11 +277,62 @@ app.get('/test-hf', async (req, res) => {
 
 // Webhook endpoint for Telegram updates
 app.post('/webhook', (req, res) => {
-  bot.processUpdate(req.body);
+  handleUpdate(req.body).catch(err => console.error('Error handling webhook update:', err));
   res.sendStatus(200);
 });
 
 // Start Express server
 app.listen(PORT, () => {
   console.log(`Express server listening on port ${PORT}`);
+  
+  // Set Webhook or Polling based on environment
+  if (IS_HF) {
+    const subdomain = process.env.SPACE_ID.replace('/', '-').toLowerCase();
+    const webhookUrl = `https://${subdomain}.hf.space/webhook`;
+    
+    const setWebhookWithRetry = async (retries = 5, delay = 5000) => {
+      for (let i = 0; i < retries; i++) {
+        try {
+          console.log(`Attempting to set webhook to: ${webhookUrl} (attempt ${i + 1}/${retries})...`);
+          const setUrl = `${TELEGRAM_API_URL}/setWebhook?url=${encodeURIComponent(webhookUrl)}`;
+          const response = await fetch(setUrl);
+          const result = await response.json();
+          if (result.ok) {
+            console.log('Telegram Webhook registered successfully!');
+            return;
+          }
+          console.error('Failed to set webhook:', result);
+        } catch (err) {
+          console.error(`Failed to set webhook error:`, err.message);
+        }
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+      console.error('All webhook registration attempts failed.');
+    };
+    
+    setWebhookWithRetry();
+  } else {
+    // Long Polling loop for local testing
+    const startPolling = async () => {
+      console.log('Starting local long polling loop...');
+      let offset = 0;
+      while (true) {
+        try {
+          const response = await fetch(`${TELEGRAM_API_URL}/getUpdates?offset=${offset}&timeout=30`);
+          const data = await response.json();
+          if (data.ok && data.result.length > 0) {
+            for (const update of data.result) {
+              offset = update.update_id + 1;
+              handleUpdate(update).catch(err => console.error('Error handling update:', err));
+            }
+          }
+        } catch (err) {
+          console.error('Polling error:', err.message);
+          await new Promise(r => setTimeout(r, 5000));
+        }
+      }
+    };
+    
+    startPolling();
+  }
 });
