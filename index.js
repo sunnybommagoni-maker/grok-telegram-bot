@@ -341,17 +341,138 @@ async function handleImageRequest(chatId, prompt) {
   }
 }
 
+// ----------------------------------------------------
+// Image Download & Analysis for Photo Editing
+// ----------------------------------------------------
+async function downloadTelegramFile(fileId) {
+  try {
+    const getFileUrl = `${TELEGRAM_API_URL}/getFile?file_id=${fileId}`;
+    const response = await httpsRequest(getFileUrl);
+    const fileData = await response.json();
+    if (!fileData.ok) {
+      throw new Error(`Telegram getFile failed: ${JSON.stringify(fileData)}`);
+    }
+    const filePath = fileData.result.file_path;
+    const downloadUrl = `${process.env.TELEGRAM_API_BASE_URL || 'https://api.telegram.org'}/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${filePath}`;
+    const fileResponse = await httpsRequest(downloadUrl);
+    if (!fileResponse.ok) {
+      throw new Error(`Failed to download file from Telegram: status ${fileResponse.status}`);
+    }
+    return fileResponse.buffer;
+  } catch (err) {
+    console.error('Error downloading Telegram file:', err.message);
+    throw err;
+  }
+}
+
+async function analyzeImage(base64Image, userCaption) {
+  try {
+    const promptText = `The user wants to edit this image.
+User instruction/caption: "${userCaption || 'Make a beautiful artistic version of this image'}"
+
+Please do the following:
+1. Analyze the original image. Describe what you see in one sentence.
+2. Create a new, highly detailed image generation prompt in English that modifies the original image to follow the user's instruction. Keep the output prompt to 2-3 sentences.
+Output your response in the following JSON format:
+{
+  "description": "your description of the original image",
+  "editPrompt": "the new generation prompt to create the edited image"
+}`;
+
+    const response = await groq.chat.completions.create({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: promptText
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:image/jpeg;base64,${base64Image}`
+              }
+            }
+          ]
+        }
+      ],
+      model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+      response_format: { type: 'json_object' }
+    });
+
+    const data = JSON.parse(response.choices[0].message.content);
+    return data;
+  } catch (error) {
+    console.error('Groq Vision analysis failed, using fallback:', error);
+    return {
+      description: 'An uploaded image.',
+      editPrompt: userCaption || 'A beautiful artistic rendering of the uploaded scene'
+    };
+  }
+}
+
+async function handlePhotoRequest(chatId, photo, caption) {
+  const statusMsgResult = await sendTelegramMessage(chatId, '👁️ *Step 1/2:* Analyzing your image with Llama-4 Vision...', { parse_mode: 'Markdown' });
+  const statusMsgId = statusMsgResult.result?.message_id;
+
+  try {
+    const fileId = photo[photo.length - 1].file_id;
+    const imageBuffer = await downloadTelegramFile(fileId);
+    const base64Image = imageBuffer.toString('base64');
+
+    const analysis = await analyzeImage(base64Image, caption);
+    const description = analysis.description;
+    const editPrompt = analysis.editPrompt;
+
+    if (statusMsgId) {
+      await editTelegramMessage(chatId, statusMsgId, `✨ *Step 2/2:* Generating edited image using FLUX.1...\n\n_Description:_\n"${description}"\n\n_Edit Prompt:_\n"${editPrompt}"`, {
+        parse_mode: 'Markdown'
+      });
+    }
+
+    const editedImageBuffer = await generateImage(editPrompt);
+
+    await sendTelegramPhoto(chatId, editedImageBuffer, `🎨 *Here is your edited image!*\n\n_Original description:_\n"${description}"\n\n_User instruction:_\n"${caption || 'Artistic edit'}"\n\n_Prompt used:_\n"${editPrompt}"`, {
+      parse_mode: 'Markdown'
+    });
+
+    if (statusMsgId) {
+      await deleteTelegramMessage(chatId, statusMsgId).catch(() => {});
+    }
+  } catch (error) {
+    console.error('Photo request handling failed:', error);
+    if (statusMsgId) {
+      await editTelegramMessage(chatId, statusMsgId, `❌ *Failed to edit image.*\n\nError: ${error.message || 'An unknown error occurred.'}`, {
+        parse_mode: 'Markdown'
+      }).catch(() => {
+        sendTelegramMessage(chatId, `❌ *Failed to edit image.*`);
+      });
+    } else {
+      await sendTelegramMessage(chatId, `❌ *Failed to edit image.*`);
+    }
+  }
+}
+
 async function handleUpdate(update) {
   const msg = update.message;
-  if (!msg || !msg.text) return;
+  if (!msg) return;
   
   const chatId = msg.chat.id;
+
+  // Handle uploaded photo
+  if (msg.photo && msg.photo.length > 0) {
+    await handlePhotoRequest(chatId, msg.photo, msg.caption);
+    return;
+  }
+
+  if (!msg.text) return;
   const text = msg.text.trim();
   
   if (text.startsWith('/start')) {
-    await sendTelegramMessage(chatId, `✨ *Welcome to AuraGen Bot!* ✨\n\nI am a premium image generator. You send a simple idea, I will use **Groq (Llama-3)** to enhance it, and **FLUX.1 (unrestricted)** to generate a stunning image!\n\n🚀 *How to use:*\nUse the command:\n\`/generate <your prompt>\`\n\nOr simply send me a direct message with your prompt!\n\nExample:\n\`/generate a golden retriever puppy in a spacesuit\`\n\nEnjoy creating!`, { parse_mode: 'Markdown' });
+    await sendTelegramMessage(chatId, `✨ *Welcome to AuraGen Bot!* ✨\n\nI am a premium image generator. You send a simple idea, I will use **Groq (Llama-3)** to enhance it, and **FLUX.1 (unrestricted)** to generate a stunning image!\n\n🚀 *How to use:*\nUse the command:\n\`/generate <your prompt>\`\n\nOr simply send me a direct message with your prompt!\n\nExample:\n\`/generate a golden retriever puppy in a spacesuit\`\n\n🖼️ *Image Editing:*\nYou can also upload any image and describe how you want to modify it in the caption! I will use **Llama-4 Vision** to understand it and generate the edited version for you!\n\nEnjoy creating!`, { parse_mode: 'Markdown' });
   } else if (text.startsWith('/help')) {
-    await sendTelegramMessage(chatId, `💡 *AuraGen Bot Commands*:\n\n• \`/generate <prompt>\` - Enhances and generates an image from your prompt.\n• \`/start\` or \`/help\` - Show bot info and welcome instructions.`, { parse_mode: 'Markdown' });
+    await sendTelegramMessage(chatId, `💡 *AuraGen Bot Commands*:\n\n• \`/generate <prompt>\` - Enhances and generates an image from your prompt.\n• \`/start\` or \`/help\` - Show bot info and welcome instructions.\n• *Image Editing* - Just upload a photo and write the changes you want in the caption!`, { parse_mode: 'Markdown' });
   } else if (text.startsWith('/generate')) {
     const prompt = text.replace(/^\/generate\s*/, '');
     if (!prompt) {
