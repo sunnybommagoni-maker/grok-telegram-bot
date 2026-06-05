@@ -20,7 +20,6 @@ const express = require('express');
 const { Groq } = require('groq-sdk');
 const path = require('path');
 const https = require('https');
-const { Client } = require('@gradio/client');
 
 // Initialize Express
 const app = express();
@@ -368,6 +367,7 @@ async function downloadTelegramFile(fileId) {
 
 async function editImage(imageBuffer, instruction) {
   try {
+    const { Client } = await import('@gradio/client');
     const blob = new Blob([imageBuffer], { type: 'image/jpeg' });
     const app = await Client.connect('timbrooks/instruct-pix2pix');
     
