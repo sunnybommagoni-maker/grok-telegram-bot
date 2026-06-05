@@ -50,7 +50,7 @@ async function enhancePrompt(userPrompt) {
           content: userPrompt
         }
       ],
-      model: 'llama3-8b-8192',
+      model: 'llama-3.1-8b-instant',
     });
     const enhanced = chatCompletion.choices[0]?.message?.content?.trim();
     return enhanced || userPrompt;
@@ -175,6 +175,51 @@ bot.on('message', async (msg) => {
 // ----------------------------------------------------
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'dashboard.html'));
+});
+
+// Diagnostic endpoint to test Hugging Face connection inside Space
+app.get('/test-hf', async (req, res) => {
+  try {
+    const token = process.env.HF_ACCESS_TOKEN;
+    const model = 'black-forest-labs/FLUX.1-schnell';
+    
+    console.log(`Running diagnostic fetch for: ${model}`);
+    const response = await fetch(`https://api-inference.huggingface.co/models/${model}`, {
+      method: 'POST',
+      headers: { 
+        'Authorization': `Bearer ${token}`, 
+        'Content-Type': 'application/json' 
+      },
+      body: JSON.stringify({ inputs: 'a cute kitten' }),
+    });
+
+    const status = response.status;
+    const headers = Object.fromEntries(response.headers.entries());
+    let body;
+    if (response.headers.get('content-type')?.includes('application/json')) {
+      body = await response.json();
+    } else {
+      const text = await response.text();
+      body = text.substring(0, 1000);
+    }
+
+    res.json({
+      status,
+      headers,
+      body
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error.message,
+      cause: error.cause ? {
+        message: error.cause.message,
+        code: error.cause.code,
+        syscall: error.cause.syscall,
+        hostname: error.cause.hostname
+      } : null,
+      stack: error.stack
+    });
+  }
 });
 
 // Webhook endpoint for Telegram updates
