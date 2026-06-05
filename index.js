@@ -20,6 +20,7 @@ const express = require('express');
 const { Groq } = require('groq-sdk');
 const path = require('path');
 const https = require('https');
+const { Client } = require('@gradio/client');
 
 // Initialize Express
 const app = express();
@@ -365,75 +366,56 @@ async function downloadTelegramFile(fileId) {
   }
 }
 
-async function analyzeImage(base64Image, userCaption) {
+async function editImage(imageBuffer, instruction) {
   try {
-    const promptText = `The user wants to edit this image.
-User instruction/caption: "${userCaption || 'Make a beautiful artistic version of this image'}"
+    const blob = new Blob([imageBuffer], { type: 'image/jpeg' });
+    const app = await Client.connect('timbrooks/instruct-pix2pix');
+    
+    // API signature: [image, prompt, steps, seed_strategy, seed, cfg_strategy, text_cfg, image_cfg]
+    const result = await app.predict('/generate', [
+      blob,                                  // Input Image
+      instruction || 'Enhance this image',   // Edit Instruction
+      20,                                    // Steps
+      'Randomize Seed',                      // Seed strategy
+      0,                                     // Seed (ignored)
+      'Fix CFG',                             // CFG strategy
+      7.5,                                   // Text CFG
+      1.5                                    // Image CFG
+    ]);
 
-Please do the following:
-1. Analyze the original image. Describe what you see in one sentence.
-2. Create a new, highly detailed image generation prompt in English that modifies the original image to follow the user's instruction. Keep the output prompt to 2-3 sentences.
-Output your response in the following JSON format:
-{
-  "description": "your description of the original image",
-  "editPrompt": "the new generation prompt to create the edited image"
-}`;
-
-    const response = await groq.chat.completions.create({
-      messages: [
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: promptText
-            },
-            {
-              type: 'image_url',
-              image_url: {
-                url: `data:image/jpeg;base64,${base64Image}`
-              }
-            }
-          ]
-        }
-      ],
-      model: 'meta-llama/llama-4-scout-17b-16e-instruct',
-      response_format: { type: 'json_object' }
-    });
-
-    const data = JSON.parse(response.choices[0].message.content);
-    return data;
+    // Gradio returns a data array. For this space, data[3] is the output image object.
+    const outputData = result.data[3];
+    if (outputData && outputData.url) {
+      // Download the generated image from the Gradio URL
+      const response = await fetch(outputData.url);
+      const arrayBuffer = await response.arrayBuffer();
+      return Buffer.from(arrayBuffer);
+    } else {
+      throw new Error('Gradio result did not contain an image URL');
+    }
   } catch (error) {
-    console.error('Groq Vision analysis failed, using fallback:', error);
-    return {
-      description: 'An uploaded image.',
-      editPrompt: userCaption || 'A beautiful artistic rendering of the uploaded scene'
-    };
+    console.error('Gradio Instruct-Pix2Pix failed:', error);
+    throw new Error('Image editing failed. The editor might be asleep or overloaded. Try again in a minute!');
   }
 }
 
 async function handlePhotoRequest(chatId, photo, caption) {
-  const statusMsgResult = await sendTelegramMessage(chatId, '👁️ *Step 1/2:* Analyzing your image with Llama-4 Vision...', { parse_mode: 'Markdown' });
+  const statusMsgResult = await sendTelegramMessage(chatId, '⚙️ *Step 1/2:* Connecting to the Image Editor...\n_(Note: If the editor was asleep, this may take 1-3 minutes to wake up)_', { parse_mode: 'Markdown' });
   const statusMsgId = statusMsgResult.result?.message_id;
 
   try {
     const fileId = photo[photo.length - 1].file_id;
     const imageBuffer = await downloadTelegramFile(fileId);
-    const base64Image = imageBuffer.toString('base64');
-
-    const analysis = await analyzeImage(base64Image, caption);
-    const description = analysis.description;
-    const editPrompt = analysis.editPrompt;
 
     if (statusMsgId) {
-      await editTelegramMessage(chatId, statusMsgId, `✨ *Step 2/2:* Generating edited image using FLUX.1...\n\n_Description:_\n"${description}"\n\n_Edit Prompt:_\n"${editPrompt}"`, {
+      await editTelegramMessage(chatId, statusMsgId, `✨ *Step 2/2:* Generating edited image using Instruct-Pix2Pix...\n\n_Instruction:_\n"${caption || 'Enhance image'}"`, {
         parse_mode: 'Markdown'
       });
     }
 
-    const editedImageBuffer = await generateImage(editPrompt);
+    const editedImageBuffer = await editImage(imageBuffer, caption);
 
-    await sendTelegramPhoto(chatId, editedImageBuffer, `🎨 *Here is your edited image!*\n\n_Original description:_\n"${description}"\n\n_User instruction:_\n"${caption || 'Artistic edit'}"\n\n_Prompt used:_\n"${editPrompt}"`, {
+    await sendTelegramPhoto(chatId, editedImageBuffer, `🎨 *Here is your edited image!*\n\n_Instruction used:_\n"${caption || 'Enhance image'}"`, {
       parse_mode: 'Markdown'
     });
 

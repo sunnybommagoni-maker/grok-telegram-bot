@@ -7,8 +7,9 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@huggingface/inference": "^2.8.0",
-    "dotenv": "^16.4.5",
+    "@gradio/client": "^2.2.1",
+    "@huggingface/inference": "^2.8.1",
+    "dotenv": "^16.6.1",
     "express": "^4.19.2",
     "groq-sdk": "^0.3.3"
   }
