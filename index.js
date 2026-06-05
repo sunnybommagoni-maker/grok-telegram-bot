@@ -1,5 +1,4 @@
 require('dotenv').config();
-require('dns').setDefaultResultOrder('ipv4first');
 
 // In-memory logger for remote diagnostics
 const logs = [];
