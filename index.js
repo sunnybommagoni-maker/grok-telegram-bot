@@ -259,41 +259,21 @@ async function generateImage(prompt) {
     }
   }
 
-  // Fallback to Hugging Face
-  const models = [
-    'black-forest-labs/FLUX.1-schnell',
-    'stabilityai/stable-diffusion-xl-base-1.0'
-  ];
-
-  let lastError = null;
-
-  for (const model of models) {
-    try {
-      console.log(`Sending prompt to HF model ${model} via native HTTPS...`);
-      const url = `https://api-inference.huggingface.co/models/${model}`;
-      
-      const response = await httpsRequest(url, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${process.env.HF_ACCESS_TOKEN}`,
-          'Content-Type': 'application/json'
-        }
-      }, { inputs: prompt });
-      
-      if (response.ok) {
-        return response.buffer;
-      }
-      
-      const errorText = response.buffer.toString('utf8');
-      console.error(`HF model ${model} failed with status ${response.status}:`, errorText);
-      lastError = new Error(`Status ${response.status}: ${errorText}`);
-    } catch (error) {
-      console.error(`HF model ${model} request error:`, error.message);
-      lastError = error;
+  // Fallback to Pollinations AI (FLUX, 100% Free & Unrestricted)
+  try {
+    console.log('Generating image using Pollinations AI (FLUX, free & unrestricted)...');
+    const encodedPrompt = encodeURIComponent(prompt);
+    const url = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nologo=true&private=true&model=flux`;
+    
+    const response = await httpsRequest(url);
+    if (response.ok) {
+      return response.buffer;
     }
+    throw new Error(`Status ${response.status}`);
+  } catch (error) {
+    console.error('Pollinations AI image generation failed:', error.message);
+    throw new Error(`Image generation failed: ${error.message}`);
   }
-
-  throw new Error(`Image generation failed: ${lastError ? lastError.message : 'Unknown error'}`);
 }
 
 // ----------------------------------------------------
@@ -369,24 +349,16 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'dashboard.html'));
 });
 
-// Diagnostic endpoint to test Hugging Face connection inside Space
-app.get('/test-hf', async (req, res) => {
+// Diagnostic endpoint to test Pollinations AI connection
+app.get('/test-pollinations', async (req, res) => {
   try {
-    const token = process.env.HF_ACCESS_TOKEN;
-    const model = 'black-forest-labs/FLUX.1-schnell';
-    
-    console.log(`Running diagnostic fetch for: ${model}`);
-    const response = await httpsRequest(`https://api-inference.huggingface.co/models/${model}`, {
-      method: 'POST',
-      headers: { 
-        'Authorization': `Bearer ${token}`, 
-        'Content-Type': 'application/json' 
-      }
-    }, { inputs: 'a cute kitten' });
+    console.log('Running diagnostic Pollinations fetch...');
+    const response = await httpsRequest('https://image.pollinations.ai/prompt/a%20cute%20kitten?width=512&height=512&nologo=true&private=true&model=flux');
 
     res.json({
       status: response.status,
       headers: response.headers,
+      ok: response.ok,
       body: response.ok ? 'Image Buffer Received successfully' : response.buffer.toString('utf8')
     });
   } catch (error) {
