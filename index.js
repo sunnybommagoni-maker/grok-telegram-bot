@@ -350,9 +350,11 @@ app.listen(PORT, () => {
   console.log(`Express server listening on port ${PORT}`);
   
   // Set Webhook or Polling based on environment
-  if (IS_HF) {
-    const subdomain = process.env.SPACE_ID.replace('/', '-').toLowerCase();
-    const webhookUrl = `https://${subdomain}.hf.space/webhook`;
+  const useWebhook = IS_HF || !!process.env.BOT_URL || !!process.env.RENDER_EXTERNAL_URL;
+  
+  if (useWebhook) {
+    const baseUrl = process.env.BOT_URL || process.env.RENDER_EXTERNAL_URL || `https://${process.env.SPACE_ID.replace('/', '-').toLowerCase()}.hf.space`;
+    const webhookUrl = `${baseUrl}/webhook`;
     
     const setWebhookWithRetry = async (retries = 5, delay = 5000) => {
       for (let i = 0; i < retries; i++) {
