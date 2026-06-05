@@ -1,5 +1,22 @@
 require('dotenv').config();
 require('dns').setDefaultResultOrder('ipv4first');
+
+// In-memory logger for remote diagnostics
+const logs = [];
+const originalLog = console.log;
+const originalError = console.error;
+
+console.log = (...args) => {
+  logs.push(`[LOG] ${new Date().toISOString()}: ${args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ')}`);
+  if (logs.length > 200) logs.shift();
+  originalLog.apply(console, args);
+};
+
+console.error = (...args) => {
+  logs.push(`[ERROR] ${new Date().toISOString()}: ${args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ')}`);
+  if (logs.length > 200) logs.shift();
+  originalError.apply(console, args);
+};
 const express = require('express');
 const { Groq } = require('groq-sdk');
 const path = require('path');
@@ -377,6 +394,45 @@ app.get('/test-hf', async (req, res) => {
       stack: error.stack
     });
   }
+});
+
+// Diagnostic endpoint to test OpenRouter connection
+app.get('/test-openrouter', async (req, res) => {
+  try {
+    const token = process.env.OPENROUTER_API_KEY;
+    const model = 'x-ai/grok-imagine-image-quality';
+    
+    console.log(`Running diagnostic OpenRouter fetch for: ${model}`);
+    const response = await httpsRequest('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      }
+    }, {
+      model: model,
+      messages: [{ role: 'user', content: 'a cute kitten' }],
+      modalities: ['image']
+    });
+
+    const data = await response.json();
+    res.json({
+      status: response.status,
+      headers: response.headers,
+      body: data
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error.message,
+      stack: error.stack
+    });
+  }
+});
+
+// Remote log viewer endpoint
+app.get('/logs', (req, res) => {
+  res.setHeader('Content-Type', 'text/plain');
+  res.send(logs.join('\n'));
 });
 
 // Webhook endpoint for Telegram updates
