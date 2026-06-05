@@ -72,7 +72,7 @@ function httpsRequest(url, options = {}, postData = null) {
 // ----------------------------------------------------
 // Telegram API Helper Functions (Native HTTPS)
 // ----------------------------------------------------
-const TELEGRAM_API_URL = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
+const TELEGRAM_API_URL = `${process.env.TELEGRAM_API_BASE_URL || 'https://api.telegram.org'}/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 
 async function sendTelegramMessage(chatId, text, options = {}) {
   try {
