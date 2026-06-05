@@ -221,45 +221,7 @@ async function enhancePrompt(userPrompt) {
 // Image Generator (OpenRouter / Hugging Face API)
 // ----------------------------------------------------
 async function generateImage(prompt) {
-  // Try OpenRouter first if key is present
-  if (process.env.OPENROUTER_API_KEY) {
-    try {
-      console.log('Generating image using OpenRouter and x-ai/grok-imagine-image-quality...');
-      const response = await httpsRequest('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://huggingface.co/spaces/Bommagoni/image',
-          'X-Title': 'AuraGen Bot'
-        }
-      }, {
-        model: 'x-ai/grok-imagine-image-quality',
-        messages: [
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        modalities: ['image']
-      });
-
-      const data = await response.json();
-      const base64Url = data.choices?.[0]?.message?.images?.[0]?.image_url?.url;
-      if (base64Url) {
-        const base64Data = base64Url.split(',')[1];
-        return Buffer.from(base64Data, 'base64');
-      } else {
-        const errorMsg = data.error?.message || 'OpenRouter response did not contain image url';
-        console.error('OpenRouter response did not contain image url:', JSON.stringify(data));
-        throw new Error(errorMsg);
-      }
-    } catch (error) {
-      console.error('OpenRouter image generation failed:', error.message);
-    }
-  }
-
-  // Fallback to Pollinations AI (FLUX, 100% Free & Unrestricted)
+  // Try Pollinations AI (FLUX, 100% Free & Unrestricted) first
   try {
     console.log('Generating image using Pollinations AI (FLUX, free & unrestricted)...');
     const encodedPrompt = encodeURIComponent(prompt);
@@ -272,6 +234,44 @@ async function generateImage(prompt) {
     throw new Error(`Status ${response.status}`);
   } catch (error) {
     console.error('Pollinations AI image generation failed:', error.message);
+    
+    // Fallback to OpenRouter only if key is present
+    if (process.env.OPENROUTER_API_KEY) {
+      try {
+        console.log('Falling back to OpenRouter and x-ai/grok-imagine-image-quality...');
+        const response = await httpsRequest('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'https://huggingface.co/spaces/Bommagoni/image',
+            'X-Title': 'AuraGen Bot'
+          }
+        }, {
+          model: 'x-ai/grok-imagine-image-quality',
+          messages: [
+            {
+              role: 'user',
+              content: prompt
+            }
+          ],
+          modalities: ['image']
+        });
+
+        const data = await response.json();
+        const base64Url = data.choices?.[0]?.message?.images?.[0]?.image_url?.url;
+        if (base64Url) {
+          const base64Data = base64Url.split(',')[1];
+          return Buffer.from(base64Data, 'base64');
+        } else {
+          const errorMsg = data.error?.message || 'OpenRouter response did not contain image url';
+          console.error('OpenRouter response did not contain image url:', JSON.stringify(data));
+          throw new Error(errorMsg);
+        }
+      } catch (orError) {
+        console.error('OpenRouter fallback image generation failed:', orError.message);
+      }
+    }
     throw new Error(`Image generation failed: ${error.message}`);
   }
 }
@@ -323,7 +323,7 @@ async function handleUpdate(update) {
   const text = msg.text.trim();
   
   if (text.startsWith('/start')) {
-    await sendTelegramMessage(chatId, `✨ *Welcome to AuraGen Bot!* ✨\n\nI am a premium image generator. You send a simple idea, I will use **Groq (Llama-3)** to enhance it, and **Hugging Face (FLUX.1)** to generate a stunning image!\n\n🚀 *How to use:*\nUse the command:\n\`/generate <your prompt>\`\n\nOr simply send me a direct message with your prompt!\n\nExample:\n\`/generate a golden retriever puppy in a spacesuit\`\n\nEnjoy creating!`, { parse_mode: 'Markdown' });
+    await sendTelegramMessage(chatId, `✨ *Welcome to AuraGen Bot!* ✨\n\nI am a premium image generator. You send a simple idea, I will use **Groq (Llama-3)** to enhance it, and **FLUX.1 (unrestricted)** to generate a stunning image!\n\n🚀 *How to use:*\nUse the command:\n\`/generate <your prompt>\`\n\nOr simply send me a direct message with your prompt!\n\nExample:\n\`/generate a golden retriever puppy in a spacesuit\`\n\nEnjoy creating!`, { parse_mode: 'Markdown' });
   } else if (text.startsWith('/help')) {
     await sendTelegramMessage(chatId, `💡 *AuraGen Bot Commands*:\n\n• \`/generate <prompt>\` - Enhances and generates an image from your prompt.\n• \`/start\` or \`/help\` - Show bot info and welcome instructions.`, { parse_mode: 'Markdown' });
   } else if (text.startsWith('/generate')) {
@@ -418,11 +418,11 @@ app.post('/webhook', (req, res) => {
 app.listen(PORT, () => {
   console.log(`Express server listening on port ${PORT}`);
   
-  // Set Webhook or Polling based on environment
-  const useWebhook = IS_HF || !!process.env.BOT_URL || !!process.env.RENDER_EXTERNAL_URL;
+  // Set Webhook or Polling based on environment. Disable bot logic on Hugging Face to avoid webhook hijacking.
+  const useWebhook = !IS_HF && (!!process.env.BOT_URL || !!process.env.RENDER_EXTERNAL_URL);
   
   if (useWebhook) {
-    const baseUrl = process.env.BOT_URL || process.env.RENDER_EXTERNAL_URL || `https://${process.env.SPACE_ID.replace('/', '-').toLowerCase()}.hf.space`;
+    const baseUrl = process.env.BOT_URL || process.env.RENDER_EXTERNAL_URL;
     const webhookUrl = `${baseUrl}/webhook`;
     
     const setWebhookWithRetry = async (retries = 5, delay = 5000) => {
@@ -446,8 +446,8 @@ app.listen(PORT, () => {
     };
     
     setWebhookWithRetry();
-  } else {
-    // Long Polling loop for local testing
+  } else if (!IS_HF) {
+    // Long Polling loop for local testing (skip on HF)
     const startPolling = async () => {
       console.log('Starting local long polling loop...');
       let offset = 0;
@@ -469,5 +469,7 @@ app.listen(PORT, () => {
     };
     
     startPolling();
+  } else {
+    console.log('Running on Hugging Face Space: Telegram Bot logic is DISABLED to prevent webhook hijacking. Webhook is managed by Render.');
   }
 });
