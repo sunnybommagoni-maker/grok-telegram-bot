@@ -201,7 +201,47 @@ async function enhancePrompt(userPrompt) {
 // ----------------------------------------------------
 // Image Generator (Hugging Face API via Native HTTPS)
 // ----------------------------------------------------
+// ----------------------------------------------------
+// Image Generator (OpenRouter / Hugging Face API)
+// ----------------------------------------------------
 async function generateImage(prompt) {
+  // Try OpenRouter first if key is present
+  if (process.env.OPENROUTER_API_KEY) {
+    try {
+      console.log('Generating image using OpenRouter and x-ai/grok-imagine-image-quality...');
+      const response = await httpsRequest('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://huggingface.co/spaces/Bommagoni/image',
+          'X-Title': 'AuraGen Bot'
+        }
+      }, {
+        model: 'x-ai/grok-imagine-image-quality',
+        messages: [
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        modalities: ['image']
+      });
+
+      const data = await response.json();
+      const base64Url = data.choices?.[0]?.message?.images?.[0]?.image_url?.url;
+      if (base64Url) {
+        const base64Data = base64Url.split(',')[1];
+        return Buffer.from(base64Data, 'base64');
+      } else {
+        console.error('OpenRouter response did not contain image url:', JSON.stringify(data));
+      }
+    } catch (error) {
+      console.error('OpenRouter image generation failed:', error.message);
+    }
+  }
+
+  // Fallback to Hugging Face
   const models = [
     'black-forest-labs/FLUX.1-schnell',
     'stabilityai/stable-diffusion-xl-base-1.0'
@@ -235,7 +275,7 @@ async function generateImage(prompt) {
     }
   }
 
-  throw new Error(`Hugging Face generation failed: ${lastError ? lastError.message : 'Unknown error'}`);
+  throw new Error(`Image generation failed: ${lastError ? lastError.message : 'Unknown error'}`);
 }
 
 // ----------------------------------------------------
