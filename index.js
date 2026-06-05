@@ -221,24 +221,49 @@ async function enhancePrompt(userPrompt) {
 // Image Generator (OpenRouter / Hugging Face API)
 // ----------------------------------------------------
 async function generateImage(prompt) {
-  // Try Pollinations AI (FLUX, 100% Free & Unrestricted) first
+  // 1. Try Hugging Face Inference API via new router URL (using token, bypasses IP limits)
+  if (process.env.HF_ACCESS_TOKEN) {
+    try {
+      console.log('Generating image using Hugging Face (FLUX.1-schnell via router)...');
+      const model = 'black-forest-labs/FLUX.1-schnell';
+      const url = `https://router.huggingface.co/hf-inference/models/${model}`;
+      const response = await httpsRequest(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.HF_ACCESS_TOKEN}`,
+          'Content-Type': 'application/json'
+        }
+      }, { inputs: prompt });
+
+      if (response.ok) {
+        console.log('Hugging Face image generation successful!');
+        return response.buffer;
+      }
+      console.error(`Hugging Face Inference returned status ${response.status}:`, response.buffer.toString('utf8'));
+    } catch (error) {
+      console.error('Hugging Face Inference failed:', error.message);
+    }
+  }
+
+  // 2. Fallback to Pollinations AI (FLUX, free & unrestricted)
   try {
-    console.log('Generating image using Pollinations AI (FLUX, free & unrestricted)...');
+    console.log('Generating image using Pollinations AI (FLUX)...');
     const encodedPrompt = encodeURIComponent(prompt);
     const url = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nologo=true&private=true&model=flux`;
     
     const response = await httpsRequest(url);
     if (response.ok) {
+      console.log('Pollinations AI image generation successful!');
       return response.buffer;
     }
     throw new Error(`Status ${response.status}`);
   } catch (error) {
     console.error('Pollinations AI image generation failed:', error.message);
     
-    // Fallback to OpenRouter only if key is present
+    // 3. Fallback to OpenRouter (paid, grok-imagine)
     if (process.env.OPENROUTER_API_KEY) {
       try {
-        console.log('Falling back to OpenRouter and x-ai/grok-imagine-image-quality...');
+        console.log('Falling back to OpenRouter (x-ai/grok-imagine)...');
         const response = await httpsRequest('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
           headers: {
@@ -262,6 +287,7 @@ async function generateImage(prompt) {
         const base64Url = data.choices?.[0]?.message?.images?.[0]?.image_url?.url;
         if (base64Url) {
           const base64Data = base64Url.split(',')[1];
+          console.log('OpenRouter image generation successful!');
           return Buffer.from(base64Data, 'base64');
         } else {
           const errorMsg = data.error?.message || 'OpenRouter response did not contain image url';
