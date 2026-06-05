@@ -251,7 +251,9 @@ async function generateImage(prompt) {
         const base64Data = base64Url.split(',')[1];
         return Buffer.from(base64Data, 'base64');
       } else {
+        const errorMsg = data.error?.message || 'OpenRouter response did not contain image url';
         console.error('OpenRouter response did not contain image url:', JSON.stringify(data));
+        throw new Error(errorMsg);
       }
     } catch (error) {
       console.error('OpenRouter image generation failed:', error.message);
