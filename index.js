@@ -1,4 +1,5 @@
 require('dotenv').config();
+require('dns').setDefaultResultOrder('ipv4first');
 const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const { Groq } = require('groq-sdk');
@@ -25,9 +26,22 @@ if (IS_HF) {
   const webhookUrl = `https://${subdomain}.hf.space/webhook`;
   
   bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN);
-  bot.setWebHook(webhookUrl)
-    .then(() => console.log(`Telegram Webhook registered at: ${webhookUrl}`))
-    .catch(err => console.error('Failed to set webhook:', err));
+  
+  const setWebhookWithRetry = async (retries = 5, delay = 5000) => {
+    for (let i = 0; i < retries; i++) {
+      try {
+        await bot.setWebHook(webhookUrl);
+        console.log(`Telegram Webhook registered successfully at: ${webhookUrl}`);
+        return;
+      } catch (err) {
+        console.error(`Failed to set webhook (attempt ${i + 1}/${retries}):`, err.message);
+        if (i === retries - 1) throw err;
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  };
+
+  setWebhookWithRetry().catch(err => console.error('All webhook registration attempts failed:', err));
 } else {
   // Local development: use polling
   bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
