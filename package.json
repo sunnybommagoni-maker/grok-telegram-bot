@@ -1,0 +1,16 @@
+{
+  "name": "telegram-image-bot",
+  "version": "1.0.0",
+  "description": "Telegram Image Generation Bot with Hugging Face and Groq",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@huggingface/inference": "^2.8.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "groq-sdk": "^0.3.3",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
