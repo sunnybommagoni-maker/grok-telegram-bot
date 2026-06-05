@@ -2,36 +2,87 @@ require('dotenv').config();
 require('dns').setDefaultResultOrder('ipv4first');
 const express = require('express');
 const { Groq } = require('groq-sdk');
-const { HfInference } = require('@huggingface/inference');
 const path = require('path');
+const https = require('https');
 
 // Initialize Express
 const app = express();
 app.use(express.json());
 
-// Initialize API clients
+// Initialize Groq API client
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-const hf = new HfInference(process.env.HF_ACCESS_TOKEN);
 
 // Check environment
 const IS_HF = !!process.env.SPACE_ID;
 const PORT = process.env.PORT || 7860;
 
 // ----------------------------------------------------
-// Telegram API Helper Functions (Native Fetch)
+// Native HTTPS Request Helper
+// ----------------------------------------------------
+function httpsRequest(url, options = {}, postData = null) {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(url);
+    const requestOptions = {
+      hostname: parsedUrl.hostname,
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: options.method || 'GET',
+      headers: options.headers || {},
+      timeout: 60000 // 60 seconds timeout
+    };
+
+    const req = https.request(requestOptions, (res) => {
+      let data = [];
+      res.on('data', (chunk) => data.push(chunk));
+      res.on('end', () => {
+        const buffer = Buffer.concat(data);
+        resolve({
+          status: res.statusCode,
+          headers: res.headers,
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          buffer: buffer,
+          text: () => Promise.resolve(buffer.toString('utf8')),
+          json: () => Promise.resolve(JSON.parse(buffer.toString('utf8')))
+        });
+      });
+    });
+
+    req.on('error', (err) => {
+      reject(err);
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Connection timeout'));
+    });
+
+    if (postData) {
+      if (postData instanceof Buffer) {
+        req.write(postData);
+      } else if (typeof postData === 'object') {
+        req.write(JSON.stringify(postData));
+      } else {
+        req.write(postData);
+      }
+    }
+    
+    req.end();
+  });
+}
+
+// ----------------------------------------------------
+// Telegram API Helper Functions (Native HTTPS)
 // ----------------------------------------------------
 const TELEGRAM_API_URL = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 
 async function sendTelegramMessage(chatId, text, options = {}) {
   try {
-    const response = await fetch(`${TELEGRAM_API_URL}/sendMessage`, {
+    const response = await httpsRequest(`${TELEGRAM_API_URL}/sendMessage`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: text,
-        ...options
-      })
+      headers: { 'Content-Type': 'application/json' }
+    }, {
+      chat_id: chatId,
+      text: text,
+      ...options
     });
     return await response.json();
   } catch (err) {
@@ -42,15 +93,14 @@ async function sendTelegramMessage(chatId, text, options = {}) {
 
 async function editTelegramMessage(chatId, messageId, text, options = {}) {
   try {
-    const response = await fetch(`${TELEGRAM_API_URL}/editMessageText`, {
+    const response = await httpsRequest(`${TELEGRAM_API_URL}/editMessageText`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        message_id: messageId,
-        text: text,
-        ...options
-      })
+      headers: { 'Content-Type': 'application/json' }
+    }, {
+      chat_id: chatId,
+      message_id: messageId,
+      text: text,
+      ...options
     });
     return await response.json();
   } catch (err) {
@@ -61,13 +111,12 @@ async function editTelegramMessage(chatId, messageId, text, options = {}) {
 
 async function deleteTelegramMessage(chatId, messageId) {
   try {
-    await fetch(`${TELEGRAM_API_URL}/deleteMessage`, {
+    await httpsRequest(`${TELEGRAM_API_URL}/deleteMessage`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        message_id: messageId
-      })
+      headers: { 'Content-Type': 'application/json' }
+    }, {
+      chat_id: chatId,
+      message_id: messageId
     });
   } catch (err) {
     console.error('Error deleting message:', err.message);
@@ -75,26 +124,52 @@ async function deleteTelegramMessage(chatId, messageId) {
 }
 
 async function sendTelegramPhoto(chatId, imageBuffer, caption, options = {}) {
-  try {
-    const formData = new FormData();
-    formData.append('chat_id', chatId);
-    formData.append('caption', caption);
+  return new Promise((resolve, reject) => {
+    const boundary = '----WebKitFormBoundary' + Math.random().toString(36).substring(2);
+    
+    let parts = [];
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`));
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n`));
     if (options.parse_mode) {
-      formData.append('parse_mode', options.parse_mode);
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\n${options.parse_mode}\r\n`));
     }
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="image.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`));
     
-    const blob = new Blob([imageBuffer], { type: 'image/jpeg' });
-    formData.append('photo', blob, 'image.jpg');
+    const postData = Buffer.concat([
+      ...parts,
+      imageBuffer,
+      Buffer.from(`\r\n--${boundary}--\r\n`)
+    ]);
     
-    const response = await fetch(`${TELEGRAM_API_URL}/sendPhoto`, {
+    const parsedUrl = new URL(`${TELEGRAM_API_URL}/sendPhoto`);
+    const requestOptions = {
+      hostname: parsedUrl.hostname,
+      path: parsedUrl.pathname,
       method: 'POST',
-      body: formData
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': postData.length
+      },
+      timeout: 60000
+    };
+    
+    const req = https.request(requestOptions, (res) => {
+      let data = [];
+      res.on('data', (chunk) => data.push(chunk));
+      res.on('end', () => {
+        resolve(JSON.parse(Buffer.concat(data).toString('utf8')));
+      });
     });
-    return await response.json();
-  } catch (err) {
-    console.error('Error sending photo:', err.message);
-    throw err;
-  }
+    
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('SendPhoto connection timeout'));
+    });
+    
+    req.write(postData);
+    req.end();
+  });
 }
 
 // ----------------------------------------------------
@@ -124,7 +199,7 @@ async function enhancePrompt(userPrompt) {
 }
 
 // ----------------------------------------------------
-// Image Generator (Hugging Face)
+// Image Generator (Hugging Face API via Native HTTPS)
 // ----------------------------------------------------
 async function generateImage(prompt) {
   const models = [
@@ -136,20 +211,26 @@ async function generateImage(prompt) {
 
   for (const model of models) {
     try {
-      console.log(`Sending prompt to HF model ${model}...`);
-      const response = await hf.textToImage({
-        model: model,
-        inputs: prompt,
-        parameters: {
-          width: 1024,
-          height: 1024,
-        }
-      });
+      console.log(`Sending prompt to HF model ${model} via native HTTPS...`);
+      const url = `https://api-inference.huggingface.co/models/${model}`;
       
-      const arrayBuffer = await response.arrayBuffer();
-      return Buffer.from(arrayBuffer);
+      const response = await httpsRequest(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.HF_ACCESS_TOKEN}`,
+          'Content-Type': 'application/json'
+        }
+      }, { inputs: prompt });
+      
+      if (response.ok) {
+        return response.buffer;
+      }
+      
+      const errorText = response.buffer.toString('utf8');
+      console.error(`HF model ${model} failed with status ${response.status}:`, errorText);
+      lastError = new Error(`Status ${response.status}: ${errorText}`);
     } catch (error) {
-      console.error(`HF model ${model} failed:`, error.message);
+      console.error(`HF model ${model} request error:`, error.message);
       lastError = error;
     }
   }
@@ -237,39 +318,22 @@ app.get('/test-hf', async (req, res) => {
     const model = 'black-forest-labs/FLUX.1-schnell';
     
     console.log(`Running diagnostic fetch for: ${model}`);
-    const response = await fetch(`https://api-inference.huggingface.co/models/${model}`, {
+    const response = await httpsRequest(`https://api-inference.huggingface.co/models/${model}`, {
       method: 'POST',
       headers: { 
         'Authorization': `Bearer ${token}`, 
         'Content-Type': 'application/json' 
-      },
-      body: JSON.stringify({ inputs: 'a cute kitten' }),
-    });
-
-    const status = response.status;
-    const headers = Object.fromEntries(response.headers.entries());
-    let body;
-    if (response.headers.get('content-type')?.includes('application/json')) {
-      body = await response.json();
-    } else {
-      const text = await response.text();
-      body = text.substring(0, 1000);
-    }
+      }
+    }, { inputs: 'a cute kitten' });
 
     res.json({
-      status,
-      headers,
-      body
+      status: response.status,
+      headers: response.headers,
+      body: response.ok ? 'Image Buffer Received successfully' : response.buffer.toString('utf8')
     });
   } catch (error) {
     res.status(500).json({
       error: error.message,
-      cause: error.cause ? {
-        message: error.cause.message,
-        code: error.cause.code,
-        syscall: error.cause.syscall,
-        hostname: error.cause.hostname
-      } : null,
       stack: error.stack
     });
   }
@@ -295,7 +359,7 @@ app.listen(PORT, () => {
         try {
           console.log(`Attempting to set webhook to: ${webhookUrl} (attempt ${i + 1}/${retries})...`);
           const setUrl = `${TELEGRAM_API_URL}/setWebhook?url=${encodeURIComponent(webhookUrl)}`;
-          const response = await fetch(setUrl);
+          const response = await httpsRequest(setUrl);
           const result = await response.json();
           if (result.ok) {
             console.log('Telegram Webhook registered successfully!');
@@ -318,12 +382,12 @@ app.listen(PORT, () => {
       let offset = 0;
       while (true) {
         try {
-          const response = await fetch(`${TELEGRAM_API_URL}/getUpdates?offset=${offset}&timeout=30`);
+          const response = await httpsRequest(`${TELEGRAM_API_URL}/getUpdates?offset=${offset}&timeout=30`);
           const data = await response.json();
           if (data.ok && data.result.length > 0) {
             for (const update of data.result) {
               offset = update.update_id + 1;
-              handleUpdate(update).catch(err => console.error('Error handling update:', err));
+              const updateResult = await handleUpdate(update);
             }
           }
         } catch (err) {
